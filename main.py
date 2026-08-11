@@ -27,15 +27,17 @@ def manejar_mensajes(message):
         url_tiktok = next((palabra for palabra in palabras if 'tiktok.com' in palabra), None)
         bot.reply_to(message, "Procesando enlace con RapidAPI... 🚀")
         
-        # --- NUEVA CONFIGURACIÓN DE RAPIDAPI ---
-        api_url = "https://tiktok-video-no-watermark2.p.rapidapi.com/user/search"
+        # --- CONFIGURACIÓN DE RAPIDAPI ---
+        # ATENCIÓN: Revisa en tu panel de RapidAPI si la URL de solicitud exacta es esta. 
+        # A veces cambia ligeramente dependiendo del endpoint que hayas seleccionado.
+        api_url = "https://tiktok-video-no-watermark2.p.rapidapi.com/" 
         
-        # Parámetros que la API exige
-        querystring = {"keywords": url_tiktok, "count": "10", "cursor": "0", "follower_count": "0", "profile_type": "0", "other_pref": "0"}
+        # Parámetro que la API exige (la URL del video de TikTok)
+        querystring = {"url": url_tiktok, "hd": "1"}
         
         # Encabezados de seguridad con tu Clave
         headers = {
-            "x-rapidapi-key": "2e44da8e00msh72608e7d6c4d5b5p1cd6d1jsn4f446aab5c8e", 
+            "x-rapidapi-key": "2e44da8e00msh72608e7d6c4d5b5p1cd6d1jsn4f446aab5c8e", # <--- ¡PON TU CLAVE AQUÍ!
             "x-rapidapi-host": "tiktok-video-no-watermark2.p.rapidapi.com"
         }
         
@@ -44,17 +46,16 @@ def manejar_mensajes(message):
             respuesta = requests.get(api_url, headers=headers, params=querystring)
             datos = respuesta.json()
 
-            # Verificamos si la respuesta es exitosa
-            # (Nota: La estructura de respuesta depende de la API específica, 
-            # esta es una aproximación común, habría que ver el JSON exacto que devuelve)
-            if 'data' in datos or 'videos' in datos: 
+            # Verificamos si la respuesta es exitosa basándonos en tu JSON (code == 0)
+            if datos.get('code') == 0 and 'data' in datos and 'videos' in datos['data']: 
+                # Tomamos el primer video de la lista de resultados
+                video_data = datos['data']['videos'][0]
+                
                 chat_id = message.chat.id
                 
-                # ¡Atención aquí! Necesitaremos ver cómo esta API específica 
-                # nombra sus enlaces de video y audio para guardarlos en caché.
-                # Por ahora, usamos un marcador de posición.
-                video_url = "URL_DEL_VIDEO" 
-                audio_url = "URL_DEL_AUDIO"
+                # Extraemos las rutas exactas según el JSON que me enviaste
+                video_url = video_data.get('play') 
+                audio_url = video_data.get('music')
                 
                 cache_enlaces[chat_id] = {'video': video_url, 'audio': audio_url}
                 
@@ -65,7 +66,7 @@ def manejar_mensajes(message):
                 
                 bot.send_message(chat_id, "¿Qué deseas descargar?", reply_markup=botones)
             else:
-                bot.reply_to(message, "No pude extraer el video. La API de RapidAPI devolvió un error.")
+                bot.reply_to(message, "No pude extraer el video. Revisa el enlace o intenta de nuevo.")
                 
         except Exception as e:
             bot.reply_to(message, f"Error general de conexión: {e}")
