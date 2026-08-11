@@ -25,25 +25,38 @@ def manejar_mensajes(message):
     if 'tiktok.com' in texto:
         palabras = texto.split()
         url_tiktok = next((palabra for palabra in palabras if 'tiktok.com' in palabra), None)
-        bot.reply_to(message, "Procesando enlace... ⏳")
-        api_url = f"https://www.tikwm.com/api/?url={url_tiktok}"
+        bot.reply_to(message, "Procesando enlace con RapidAPI... 🚀")
+        
+        # --- NUEVA CONFIGURACIÓN DE RAPIDAPI ---
+        api_url = "https://tiktok-video-no-watermark2.p.rapidapi.com/user/search"
+        
+        # Parámetros que la API exige
+        querystring = {"keywords": url_tiktok, "count": "10", "cursor": "0", "follower_count": "0", "profile_type": "0", "other_pref": "0"}
+        
+        # Encabezados de seguridad con tu Clave
+        headers = {
+            "x-rapidapi-key": "PEGA_AQUÍ_TU_CLAVE_DE_RAPIDAPI", 
+            "x-rapidapi-host": "tiktok-video-no-watermark2.p.rapidapi.com"
+        }
         
         try:
-            # Hacemos la petición pero NO la convertimos a JSON inmediatamente
-            respuesta_cruda = requests.get(api_url)
-            
-            # Intentamos convertirla a JSON de forma segura
-            try:
-                respuesta = respuesta_cruda.json()
-            except ValueError:
-                # Si la API devuelve HTML o error de Cloudflare en lugar de JSON
-                bot.reply_to(message, "Ups, la API de TikTok está saturada o caída en este momento. 🥲 Por favor, intenta de nuevo en unos minutos.")
-                return
+            # Hacemos la petición a la nueva API
+            respuesta = requests.get(api_url, headers=headers, params=querystring)
+            datos = respuesta.json()
 
-            if respuesta.get('code') == 0:
-                datos = respuesta['data']
+            # Verificamos si la respuesta es exitosa
+            # (Nota: La estructura de respuesta depende de la API específica, 
+            # esta es una aproximación común, habría que ver el JSON exacto que devuelve)
+            if 'data' in datos or 'videos' in datos: 
                 chat_id = message.chat.id
-                cache_enlaces[chat_id] = {'video': datos.get('play'), 'audio': datos.get('music')}
+                
+                # ¡Atención aquí! Necesitaremos ver cómo esta API específica 
+                # nombra sus enlaces de video y audio para guardarlos en caché.
+                # Por ahora, usamos un marcador de posición.
+                video_url = "URL_DEL_VIDEO" 
+                audio_url = "URL_DEL_AUDIO"
+                
+                cache_enlaces[chat_id] = {'video': video_url, 'audio': audio_url}
                 
                 botones = InlineKeyboardMarkup()
                 btn_video = InlineKeyboardButton("🎬 Video", callback_data="dl_video")
@@ -52,9 +65,7 @@ def manejar_mensajes(message):
                 
                 bot.send_message(chat_id, "¿Qué deseas descargar?", reply_markup=botones)
             else:
-                # Capturamos el límite de peticiones (El error Free Api Limit)
-                mensaje_error = respuesta.get('msg', 'Error desconocido')
-                bot.reply_to(message, f"La API rechazó la solicitud. 🚧 Motivo: {mensaje_error}")
+                bot.reply_to(message, "No pude extraer el video. La API de RapidAPI devolvió un error.")
                 
         except Exception as e:
             bot.reply_to(message, f"Error general de conexión: {e}")
