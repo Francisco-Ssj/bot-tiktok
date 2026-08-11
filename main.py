@@ -35,7 +35,7 @@ def manejar_mensajes(message):
         
         # Encabezados de seguridad con tu Clave
         headers = {
-            "x-rapidapi-key": "PEGA_AQUÍ_TU_CLAVE_DE_RAPIDAPI", 
+            "x-rapidapi-key": "2e44da8e00msh72608e7d6c4d5b5p1cd6d1jsn4f446aab5c8e", 
             "x-rapidapi-host": "tiktok-video-no-watermark2.p.rapidapi.com"
         }
         
