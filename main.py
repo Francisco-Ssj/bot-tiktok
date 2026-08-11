@@ -5,6 +5,8 @@ from flask import Flask
 import threading
 import os
 
+# Buscamos el token en las variables de entorno de Render
+# Si lo pruebas en tu PC, reemplaza 'TU_TOKEN_AQUI' por tu token real
 TOKEN = os.environ.get('TELEGRAM_TOKEN', '8514532683:AAHjkB8o0IKo2WqgZZNB7awFdtS50WW1VQ8')
 bot = telebot.TeleBot(TOKEN)
 cache_enlaces = {}
@@ -27,7 +29,17 @@ def manejar_mensajes(message):
         api_url = f"https://www.tikwm.com/api/?url={url_tiktok}"
         
         try:
-            respuesta = requests.get(api_url).json()
+            # Hacemos la petición pero NO la convertimos a JSON inmediatamente
+            respuesta_cruda = requests.get(api_url)
+            
+            # Intentamos convertirla a JSON de forma segura
+            try:
+                respuesta = respuesta_cruda.json()
+            except ValueError:
+                # Si la API devuelve HTML o error de Cloudflare en lugar de JSON
+                bot.reply_to(message, "Ups, la API de TikTok está saturada o caída en este momento. 🥲 Por favor, intenta de nuevo en unos minutos.")
+                return
+
             if respuesta.get('code') == 0:
                 datos = respuesta['data']
                 chat_id = message.chat.id
@@ -40,9 +52,12 @@ def manejar_mensajes(message):
                 
                 bot.send_message(chat_id, "¿Qué deseas descargar?", reply_markup=botones)
             else:
-                bot.reply_to(message, f"La API rechazó el video. Detalles: {respuesta}")
+                # Capturamos el límite de peticiones (El error Free Api Limit)
+                mensaje_error = respuesta.get('msg', 'Error desconocido')
+                bot.reply_to(message, f"La API rechazó la solicitud. 🚧 Motivo: {mensaje_error}")
+                
         except Exception as e:
-            bot.reply_to(message, f"Error de conexión en Python: {e}")
+            bot.reply_to(message, f"Error general de conexión: {e}")
     else:
         bot.reply_to(message, "Ese no parece un enlace válido de TikTok. 😅 Envíame uno para empezar.")
 
