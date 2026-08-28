@@ -6,7 +6,7 @@ import threading
 import os
 
 # Configuración del Token
-TOKEN = os.environ.get('TELEGRAM_TOKEN', '8514532683:AAHjkB8o0IKo2WqgZZNB7awFdtS50WW1VQ8')
+TOKEN = os.environ.get('TELEGRAM_TOKEN', '8514532683:AAFzZbsWs8-dDIMl01ROjjuo5TnyUL6dgL0')
 bot = telebot.TeleBot(TOKEN)
 cache_enlaces = {}
 
