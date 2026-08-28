@@ -5,14 +5,14 @@ from flask import Flask
 import threading
 import os
 
-# Buscamos el token en Render. Si quieres pegarlo manual, ponlo entre las segundas comillas.
+# Tu Token de Telegram
 TOKEN = os.environ.get('TELEGRAM_TOKEN', '8514532683:AAGBc0230C-VoXM-iPN5QbmGQcIlOkfP864')
 bot = telebot.TeleBot(TOKEN)
 cache_enlaces = {}
 
 @bot.message_handler(commands=['start', 'help'])
 def enviar_bienvenida(message):
-    bot.reply_to(message, "¡Hola! 👋 Soy un bot diseñado para descargar de TikTok.\n\nEnvíame un enlace y te daré opciones para descargar el video o solo el audio.")
+    bot.reply_to(message, "¡Hola! 👋 Soy un bot diseñado para descargar de TikTok sin marca de agua.\n\nEnvíame un enlace para empezar.")
 
 @bot.message_handler(func=lambda message: True)
 def manejar_mensajes(message):
@@ -20,30 +20,30 @@ def manejar_mensajes(message):
     if 'tiktok.com' in texto:
         palabras = texto.split()
         url_tiktok = next((palabra for palabra in palabras if 'tiktok.com' in palabra), None)
-        bot.reply_to(message, "Procesando enlace con Cobalt API... 🚀")
+        bot.reply_to(message, "Procesando enlace con RapidAPI... 🚀")
         
-        api_url = "https://api.cobalt.tools/api/json"
+        # --- CONFIGURACIÓN DE RAPIDAPI ---
+        api_url = "https://tiktok-video-no-watermark2.p.rapidapi.com/"
+        querystring = {"url": url_tiktok, "hd": "1"}
         
-        # Simulamos ser Google Chrome para que la API no detecte que somos un bot
+        # Tu llave secreta de RapidAPI
         headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "x-rapidapi-key": "2e44da8e00msh72608e7d6c4d5b5p1cd6d1jsn4f446aab5c8e",
+            "x-rapidapi-host": "tiktok-video-no-watermark2.p.rapidapi.com"
         }
         
-        payload_video = {"url": url_tiktok}
-        payload_audio = {"url": url_tiktok, "isAudioOnly": True}
-        
         try:
-            res_video = requests.post(api_url, headers=headers, json=payload_video).json()
-            res_audio = requests.post(api_url, headers=headers, json=payload_audio).json()
+            respuesta = requests.get(api_url, headers=headers, params=querystring)
+            datos = respuesta.json()
             
-            print(f"Respuesta Cobalt: {res_video}")
-            
-            if res_video.get('status') in ['stream', 'redirect', 'picker']:
+            if datos.get('code') == 0 and 'data' in datos:
+                video_data = datos['data']
+                if 'videos' in video_data:
+                    video_data = video_data['videos'][0]
+                
                 chat_id = message.chat.id
-                video_url = res_video.get('url')
-                audio_url = res_audio.get('url') if res_audio.get('status') in ['stream', 'redirect'] else None
+                video_url = video_data.get('play') 
+                audio_url = video_data.get('music')
                 
                 cache_enlaces[chat_id] = {'video': video_url, 'audio': audio_url}
                 
@@ -54,7 +54,7 @@ def manejar_mensajes(message):
                 
                 bot.send_message(chat_id, "¿Qué deseas descargar?", reply_markup=botones)
             else:
-                bot.reply_to(message, f"La API no pudo extraer el video. Motivo: {res_video.get('text', 'Error desconocido')}")
+                bot.reply_to(message, "La API no pudo extraer el video. Revisa el enlace o intenta de nuevo.")
                 
         except Exception as e:
             bot.reply_to(message, f"Error general de conexión: {e}")
@@ -84,7 +84,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    return "¡El Bot de TikTok está encendido!"
+    return "¡El Bot de TikTok está encendido y usando RapidAPI!"
 
 def run_flask():
     puerto = int(os.environ.get("PORT", 10000))
@@ -92,5 +92,4 @@ def run_flask():
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
-    print("Iniciando conexión con Telegram... 🚀")
     bot.infinity_polling()
