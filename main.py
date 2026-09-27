@@ -1,5 +1,7 @@
 import os
 import re
+import time
+import uuid
 import tempfile
 import threading
 
@@ -20,67 +22,128 @@ RAPIDAPI_HOST = "tiktok-video-no-watermark2.p.rapidapi.com"
 RAPIDAPI_URL = f"https://{RAPIDAPI_HOST}/"
 
 if not TELEGRAM_TOKEN:
-    raise RuntimeError(
-        "Falta la variable de entorno TELEGRAM_TOKEN"
-    )
+    raise RuntimeError("Falta TELEGRAM_TOKEN")
 
 if not RAPIDAPI_KEY:
-    raise RuntimeError(
-        "Falta la variable de entorno RAPIDAPI_KEY"
-    )
+    raise RuntimeError("Falta RAPIDAPI_KEY")
 
-
-# ============================================================
-# INICIALIZACIÓN
-# ============================================================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
 
-# Guarda temporalmente la información de cada TikTok.
-# Por ahora usamos memoria. Más adelante lo mejoraremos.
-cache_enlaces = {}
+
+# ============================================================
+# MEMORIA TEMPORAL
+# ============================================================
+
+# {
+#   "abc123": {
+#       "video": "...",
+#       "audio": "...",
+#       "chat_id": 123,
+#       "created": 123456789,
+#       "processing": False
+#   }
+# }
+
+descargas = {}
+
+descargas_lock = threading.Lock()
+
+SESION_DURACION = 30 * 60  # 30 minutos
 
 
 # ============================================================
-# FUNCIONES AUXILIARES
+# UTILIDADES
 # ============================================================
 
 def extraer_url_tiktok(texto):
-    """
-    Busca una URL de TikTok dentro del mensaje.
-    """
-
     if not texto:
         return None
 
-    patron = r"https?://[^\s]+tiktok\.com/[^\s]+"
+    patron = r"https?://[^\s]*tiktok\.com/[^\s]+"
 
-    coincidencia = re.search(
+    resultado = re.search(
         patron,
         texto,
         flags=re.IGNORECASE
     )
 
-    if coincidencia:
-        return coincidencia.group(0)
-
-    return None
+    return resultado.group(0) if resultado else None
 
 
-def obtener_datos_tiktok(url_tiktok):
-    """
-    Consulta RapidAPI y devuelve la información
-    necesaria para descargar el TikTok.
-    """
+def limpiar_sesiones():
+    ahora = time.time()
 
+    with descargas_lock:
+        expiradas = [
+            identificador
+            for identificador, datos in descargas.items()
+            if ahora - datos["created"] > SESION_DURACION
+        ]
+
+        for identificador in expiradas:
+            descargas.pop(identificador, None)
+
+
+def crear_sesion(chat_id, video_url, audio_url):
+    limpiar_sesiones()
+
+    identificador = uuid.uuid4().hex[:12]
+
+    with descargas_lock:
+        descargas[identificador] = {
+            "chat_id": chat_id,
+            "video": video_url,
+            "audio": audio_url,
+            "created": time.time(),
+            "processing": False
+        }
+
+    return identificador
+
+
+def obtener_sesion(identificador):
+    limpiar_sesiones()
+
+    with descargas_lock:
+        return descargas.get(identificador)
+
+
+def bloquear_sesion(identificador):
+    with descargas_lock:
+        sesion = descargas.get(identificador)
+
+        if not sesion:
+            return False
+
+        if sesion["processing"]:
+            return False
+
+        sesion["processing"] = True
+        return True
+
+
+def desbloquear_sesion(identificador):
+    with descargas_lock:
+        sesion = descargas.get(identificador)
+
+        if sesion:
+            sesion["processing"] = False
+
+
+# ============================================================
+# RAPIDAPI
+# ============================================================
+
+def obtener_tiktok(url):
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": RAPIDAPI_HOST
     }
 
     parametros = {
-        "url": url_tiktok,
+        "url": url,
         "hd": "1"
     }
 
@@ -88,7 +151,7 @@ def obtener_datos_tiktok(url_tiktok):
         RAPIDAPI_URL,
         headers=headers,
         params=parametros,
-        timeout=30
+        timeout=(10, 45)
     )
 
     respuesta.raise_for_status()
@@ -96,68 +159,59 @@ def obtener_datos_tiktok(url_tiktok):
     datos = respuesta.json()
 
     if datos.get("code") != 0:
-        mensaje = datos.get(
-            "msg",
-            "RapidAPI no pudo procesar el enlace."
-        )
-
-        raise RuntimeError(mensaje)
-
-    video_data = datos.get("data")
-
-    if not video_data:
         raise RuntimeError(
-            "RapidAPI no devolvió información del TikTok."
+            datos.get("msg", "RapidAPI rechazó el enlace.")
         )
 
-    # Algunas respuestas pueden incluir una lista de videos.
-    if isinstance(video_data, dict) and "videos" in video_data:
-        videos = video_data.get("videos")
+    contenido = datos.get("data")
 
-        if videos and isinstance(videos, list):
-            video_data = videos[0]
+    if not contenido:
+        raise RuntimeError(
+            "RapidAPI no devolvió información."
+        )
 
-    video_url = video_data.get("play")
-    audio_url = video_data.get("music")
+    if isinstance(contenido, dict) and "videos" in contenido:
+        videos = contenido.get("videos")
+
+        if isinstance(videos, list) and videos:
+            contenido = videos[0]
+
+    video_url = contenido.get("play")
+    audio_url = contenido.get("music")
 
     if not video_url:
         raise RuntimeError(
-            "No se encontró una URL válida para el video."
+            "No se encontró el video."
         )
 
-    return {
-        "video": video_url,
-        "audio": audio_url
-    }
+    return video_url, audio_url
 
+
+# ============================================================
+# DESCARGA DE ARCHIVOS
+# ============================================================
 
 def descargar_archivo(url, extension):
-    """
-    Descarga un archivo desde una URL y devuelve
-    la ruta temporal.
-    """
-
-    if not url:
-        raise RuntimeError(
-            "No existe una URL válida para descargar."
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36"
         )
+    }
 
+    # 10 segundos para conectar.
+    # Hasta 5 minutos esperando datos.
     respuesta = requests.get(
         url,
+        headers=headers,
         stream=True,
-        timeout=120,
         allow_redirects=True,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36"
-            )
-        }
+        timeout=(10, 300)
     )
 
     respuesta.raise_for_status()
 
-    archivo_temporal = tempfile.NamedTemporaryFile(
+    temporal = tempfile.NamedTemporaryFile(
         delete=False,
         suffix=extension
     )
@@ -167,26 +221,29 @@ def descargar_archivo(url, extension):
             chunk_size=1024 * 1024
         ):
             if bloque:
-                archivo_temporal.write(bloque)
+                temporal.write(bloque)
 
-        archivo_temporal.close()
+        temporal.close()
 
-        return archivo_temporal.name
+        tamaño = os.path.getsize(temporal.name)
+
+        if tamaño == 0:
+            raise RuntimeError(
+                "El archivo descargado está vacío."
+            )
+
+        return temporal.name
 
     except Exception:
-        archivo_temporal.close()
+        temporal.close()
 
-        if os.path.exists(archivo_temporal.name):
-            os.remove(archivo_temporal.name)
+        if os.path.exists(temporal.name):
+            os.remove(temporal.name)
 
         raise
 
 
-def eliminar_archivo(ruta):
-    """
-    Elimina un archivo temporal si existe.
-    """
-
+def borrar_archivo(ruta):
     if ruta and os.path.exists(ruta):
         try:
             os.remove(ruta)
@@ -199,299 +256,339 @@ def eliminar_archivo(ruta):
 # ============================================================
 
 @bot.message_handler(commands=["start"])
-def comando_start(message):
-
-    texto = (
+def start(message):
+    bot.reply_to(
+        message,
         "👋 ¡Hola!\n\n"
-        "Envíame un enlace de TikTok y podré descargarlo "
-        "sin marca de agua.\n\n"
-        "Puedes elegir entre:\n"
-        "🎬 Video\n"
+        "Envíame un enlace de TikTok y podrás descargar:\n\n"
+        "🎬 Video sin marca de agua\n"
         "🎵 Audio"
     )
 
-    bot.reply_to(message, texto)
-
 
 @bot.message_handler(commands=["help"])
-def comando_help(message):
-
-    texto = (
-        "📖 ¿Cómo usar el bot?\n\n"
+def help_command(message):
+    bot.reply_to(
+        message,
+        "📖 Cómo usar el bot\n\n"
         "1. Copia un enlace de TikTok.\n"
-        "2. Envíalo a este chat.\n"
-        "3. Espera a que el bot lo procese.\n"
-        "4. Elige Video o Audio."
+        "2. Envíalo aquí.\n"
+        "3. Elige Video o Audio.\n"
+        "4. Espera a que termine la descarga."
     )
-
-    bot.reply_to(message, texto)
 
 
 # ============================================================
-# RECEPCIÓN DE ENLACES
+# MENSAJES
 # ============================================================
 
 @bot.message_handler(
     content_types=["text"],
     func=lambda message: True
 )
-def manejar_mensaje(message):
+def recibir_mensaje(message):
+    url = extraer_url_tiktok(message.text)
 
-    url_tiktok = extraer_url_tiktok(message.text)
-
-    if not url_tiktok:
+    if not url:
         bot.reply_to(
             message,
-            "❌ No encontré un enlace válido de TikTok."
+            "❌ Envíame un enlace válido de TikTok."
         )
         return
 
-    mensaje_estado = bot.reply_to(
+    estado = bot.reply_to(
         message,
-        "🔎 Procesando enlace..."
+        "🔎 Buscando TikTok..."
     )
 
     try:
+        video_url, audio_url = obtener_tiktok(url)
 
-        datos = obtener_datos_tiktok(url_tiktok)
+        identificador = crear_sesion(
+            message.chat.id,
+            video_url,
+            audio_url
+        )
 
-        chat_id = message.chat.id
+        teclado = InlineKeyboardMarkup()
 
-        cache_enlaces[chat_id] = datos
-
-        botones = InlineKeyboardMarkup()
-
-        botones.row(
+        teclado.row(
             InlineKeyboardButton(
                 "🎬 Video",
-                callback_data="dl_video"
+                callback_data=f"video:{identificador}"
             )
         )
 
-        if datos.get("audio"):
-            botones.row(
+        if audio_url:
+            teclado.row(
                 InlineKeyboardButton(
                     "🎵 Audio",
-                    callback_data="dl_audio"
+                    callback_data=f"audio:{identificador}"
                 )
             )
 
         bot.edit_message_text(
             "✅ TikTok encontrado.\n\n"
             "¿Qué deseas descargar?",
-            chat_id=chat_id,
-            message_id=mensaje_estado.message_id,
-            reply_markup=botones
+            chat_id=message.chat.id,
+            message_id=estado.message_id,
+            reply_markup=teclado
         )
 
     except requests.Timeout:
-
         bot.edit_message_text(
-            "⏱️ La solicitud tardó demasiado.\n"
+            "⏱️ TikTok tardó demasiado en responder.\n"
             "Intenta nuevamente.",
             chat_id=message.chat.id,
-            message_id=mensaje_estado.message_id
-        )
-
-    except requests.RequestException as error:
-
-        print(
-            f"[ERROR RAPIDAPI] {type(error).__name__}: {error}"
-        )
-
-        bot.edit_message_text(
-            "❌ No pude comunicarme con el servicio "
-            "de descarga.\n\n"
-            "Intenta nuevamente en unos segundos.",
-            chat_id=message.chat.id,
-            message_id=mensaje_estado.message_id
+            message_id=estado.message_id
         )
 
     except Exception as error:
-
         print(
-            f"[ERROR PROCESANDO TIKTOK] "
-            f"{type(error).__name__}: {error}"
+            "[ERROR TIKTOK]",
+            type(error).__name__,
+            str(error)
         )
 
         bot.edit_message_text(
-            "❌ No pude procesar ese TikTok.\n\n"
-            "Comprueba que el enlace sea válido "
-            "e intenta nuevamente.",
+            "❌ No pude procesar ese TikTok.",
             chat_id=message.chat.id,
-            message_id=mensaje_estado.message_id
+            message_id=estado.message_id
         )
 
 
 # ============================================================
-# BOTONES
+# CALLBACKS
 # ============================================================
 
 @bot.callback_query_handler(
-    func=lambda call: call.data in ["dl_video", "dl_audio"]
+    func=lambda call:
+        call.data.startswith("video:")
+        or call.data.startswith("audio:")
 )
-def procesar_boton(call):
-
-    chat_id = call.message.chat.id
-
-    if chat_id not in cache_enlaces:
-
+def callback_descarga(call):
+    try:
+        tipo, identificador = call.data.split(":", 1)
+    except ValueError:
         bot.answer_callback_query(
             call.id,
-            "La descarga expiró. Envía nuevamente el enlace.",
+            "Solicitud inválida.",
             show_alert=True
         )
-
         return
 
-    enlaces = cache_enlaces[chat_id]
+    sesion = obtener_sesion(identificador)
 
-    # Respondemos inmediatamente al callback para que
-    # Telegram no deje el botón cargando.
+    if not sesion:
+        bot.answer_callback_query(
+            call.id,
+            "Esta descarga expiró. Envía el TikTok nuevamente.",
+            show_alert=True
+        )
+        return
+
+    if sesion["chat_id"] != call.message.chat.id:
+        bot.answer_callback_query(
+            call.id,
+            "Esta descarga no pertenece a este chat.",
+            show_alert=True
+        )
+        return
+
+    if not bloquear_sesion(identificador):
+        bot.answer_callback_query(
+            call.id,
+            "Ya estoy procesando esta descarga.",
+            show_alert=True
+        )
+        return
+
     bot.answer_callback_query(
         call.id,
-        "Preparando descarga..."
+        "Descarga iniciada 🚀"
     )
 
-    ruta_archivo = None
+    # Quitamos los botones inmediatamente.
+    try:
+        bot.edit_message_reply_markup(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+    hilo = threading.Thread(
+        target=procesar_descarga,
+        args=(
+            call.message.chat.id,
+            identificador,
+            tipo
+        ),
+        daemon=True
+    )
+
+    hilo.start()
+
+
+# ============================================================
+# PROCESAMIENTO EN SEGUNDO PLANO
+# ============================================================
+
+def procesar_descarga(
+    chat_id,
+    identificador,
+    tipo
+):
+    ruta = None
+    mensaje_estado = None
 
     try:
+        sesion = obtener_sesion(identificador)
 
-        # ----------------------------------------------------
-        # VIDEO
-        # ----------------------------------------------------
+        if not sesion:
+            bot.send_message(
+                chat_id,
+                "❌ La descarga expiró."
+            )
+            return
 
-        if call.data == "dl_video":
-
-            video_url = enlaces.get("video")
-
-            if not video_url:
-                bot.send_message(
-                    chat_id,
-                    "❌ No encontré el video."
-                )
-                return
+        if tipo == "video":
+            url = sesion.get("video")
+            extension = ".mp4"
 
             mensaje_estado = bot.send_message(
                 chat_id,
                 "⬇️ Descargando video..."
             )
 
-            ruta_archivo = descargar_archivo(
-                video_url,
-                ".mp4"
-            )
-
-            bot.edit_message_text(
-                "📤 Enviando video...",
-                chat_id=chat_id,
-                message_id=mensaje_estado.message_id
-            )
-
-            with open(ruta_archivo, "rb") as video:
-
-                bot.send_video(
-                    chat_id,
-                    video,
-                    supports_streaming=True,
-                    timeout=120
-                )
-
-            bot.delete_message(
-                chat_id,
-                mensaje_estado.message_id
-            )
-
-        # ----------------------------------------------------
-        # AUDIO
-        # ----------------------------------------------------
-
-        elif call.data == "dl_audio":
-
-            audio_url = enlaces.get("audio")
-
-            if not audio_url:
-                bot.send_message(
-                    chat_id,
-                    "❌ Este TikTok no tiene audio disponible."
-                )
-                return
+        else:
+            url = sesion.get("audio")
+            extension = ".mp3"
 
             mensaje_estado = bot.send_message(
                 chat_id,
                 "⬇️ Descargando audio..."
             )
 
-            ruta_archivo = descargar_archivo(
-                audio_url,
-                ".mp3"
+        if not url:
+            raise RuntimeError(
+                "No existe una URL para este archivo."
             )
 
-            bot.edit_message_text(
-                "📤 Enviando audio...",
-                chat_id=chat_id,
-                message_id=mensaje_estado.message_id
-            )
+        inicio = time.time()
 
-            with open(ruta_archivo, "rb") as audio:
+        ruta = descargar_archivo(
+            url,
+            extension
+        )
 
-                bot.send_audio(
+        tiempo_descarga = round(
+            time.time() - inicio,
+            2
+        )
+
+        tamaño_mb = round(
+            os.path.getsize(ruta)
+            / 1024
+            / 1024,
+            2
+        )
+
+        print(
+            f"[DESCARGA OK] "
+            f"{tipo} | "
+            f"{tamaño_mb} MB | "
+            f"{tiempo_descarga}s"
+        )
+
+        bot.edit_message_text(
+            f"📤 Enviando {tipo}...",
+            chat_id=chat_id,
+            message_id=mensaje_estado.message_id
+        )
+
+        inicio_envio = time.time()
+
+        if tipo == "video":
+            with open(ruta, "rb") as archivo:
+                bot.send_video(
                     chat_id,
-                    audio,
-                    timeout=120
+                    archivo,
+                    supports_streaming=True,
+                    timeout=600
                 )
 
+        else:
+            with open(ruta, "rb") as archivo:
+                bot.send_audio(
+                    chat_id,
+                    archivo,
+                    title="Audio de TikTok",
+                    performer="TikTok",
+                    timeout=600
+                )
+
+        tiempo_envio = round(
+            time.time() - inicio_envio,
+            2
+        )
+
+        print(
+            f"[TELEGRAM OK] "
+            f"{tipo} enviado en "
+            f"{tiempo_envio}s"
+        )
+
+        try:
             bot.delete_message(
                 chat_id,
                 mensaje_estado.message_id
             )
+        except Exception:
+            pass
 
-    except requests.Timeout:
+    except requests.Timeout as error:
+        print(
+            "[TIMEOUT DESCARGA]",
+            type(error).__name__,
+            str(error)
+        )
 
         bot.send_message(
             chat_id,
-            "⏱️ La descarga tardó demasiado.\n"
+            "⏱️ El servidor de TikTok tardó demasiado "
+            "en entregar el archivo.\n\n"
             "Intenta nuevamente."
         )
 
-    except requests.RequestException as error:
-
-        print(
-            f"[ERROR DESCARGA] "
-            f"{type(error).__name__}: {error}"
-        )
-
-        bot.send_message(
-            chat_id,
-            "❌ No pude descargar el archivo desde TikTok."
-        )
-
     except Exception as error:
-
         print(
-            f"[ERROR ENVÍO TELEGRAM] "
-            f"{type(error).__name__}: {error}"
+            "[ERROR DESCARGA]",
+            type(error).__name__,
+            str(error)
         )
 
         bot.send_message(
             chat_id,
-            "❌ Ocurrió un error al preparar el archivo."
+            "❌ No pude completar la descarga.\n"
+            "Intenta nuevamente."
         )
 
     finally:
-
-        eliminar_archivo(ruta_archivo)
+        borrar_archivo(ruta)
+        desbloquear_sesion(identificador)
 
 
 # ============================================================
-# SERVIDOR WEB PARA RENDER
+# RENDER / FLASK
 # ============================================================
 
 @app.route("/")
-def inicio():
+def index():
     return {
         "status": "online",
-        "service": "TikTok Telegram Bot"
+        "bot": "TikTok Limpio"
     }
 
 
@@ -502,13 +599,9 @@ def health():
     }
 
 
-def ejecutar_servidor():
-
+def ejecutar_flask():
     puerto = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
+        os.environ.get("PORT", 10000)
     )
 
     app.run(
@@ -523,21 +616,20 @@ def ejecutar_servidor():
 # ============================================================
 
 if __name__ == "__main__":
-
-    print("====================================")
-    print(" TikTok Telegram Bot")
-    print(" Iniciando...")
-    print("====================================")
+    print("==============================")
+    print(" TikTok Limpio")
+    print("==============================")
 
     servidor = threading.Thread(
-        target=ejecutar_servidor,
+        target=ejecutar_flask,
         daemon=True
     )
 
     servidor.start()
 
-    print("[OK] Servidor web iniciado")
-    print("[OK] Iniciando Telegram Bot")
+    print("[OK] Servidor web")
+    print("[OK] Telegram Bot")
+    print("[OK] Esperando mensajes...")
 
     bot.infinity_polling(
         timeout=60,
